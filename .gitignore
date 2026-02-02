@@ -1,0 +1,17 @@
+
+venv/
+
+
+models/
+
+
+faiss_index/
+
+
+__pycache__/
+*.py[cod]
+temp.pdf
+
+
+.DS_Store
+Thumbs.db
