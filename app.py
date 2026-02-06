@@ -2,21 +2,20 @@ import os
 import streamlit as st
 from pypdf import PdfReader
 import docx
-from moviepy import VideoFileClip 
+from moviepy import VideoFileClip
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-from huggingface_hub import InferenceClient
+from google import genai  # Die neue 2026 Bibliothek
 
 # --- 1. SETUP ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 model_path = os.path.join(current_dir, "models")
 os.makedirs(model_path, exist_ok=True)
 
-st.set_page_config(page_title="DocQuery Pro", layout="wide")
-st.title("🤖 DocQuery: PDF, Word & Video Chat")
+st.set_page_config(page_title="DocQuery Gemini Pro", layout="wide")
+st.title("♊ DocQuery: Powered by Gemini")
 
-# Session State initialisieren
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "chunks" not in st.session_state:
@@ -26,130 +25,104 @@ if "chunks" not in st.session_state:
 
 @st.cache_resource
 def load_embedder():
-    """Lädt das Modell zur Text-Vektorisierung (Bedeutungsverständnis)."""
     return SentenceTransformer("all-MiniLM-L6-v2", cache_folder=model_path)
 
-def extract_text_from_file(uploaded_file, hf_token):
-    """Extrahiert Text aus verschiedenen Formaten oder transkribiert MP4."""
+def extract_text_from_file(uploaded_file):
+    """Extrahiert Text aus PDF oder DOCX."""
     filename = uploaded_file.name
     text = ""
-
     if filename.endswith(".pdf"):
         reader = PdfReader(uploaded_file)
         for page in reader.pages:
             text += page.extract_text() or ""
-            
     elif filename.endswith(".docx"):
         doc = docx.Document(uploaded_file)
         text = "\n".join([para.text for para in doc.paragraphs])
-        
-    elif filename.endswith(".mp4"):
-        with st.spinner(f"🎥 Video wird transkribiert: {filename}..."):
-            # Temporäre Dateien speichern
-            with open("temp_video.mp4", "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            # Audio aus Video extrahieren mit VideoFileClip
-            video = VideoFileClip("temp_video.mp4")
-            video.audio.write_audiofile("temp_audio.mp3", logger=None)
-            
-            # KI-Transkription (Whisper via HuggingFace)
-            client = InferenceClient(api_key=hf_token)
-            audio_result = client.automatic_speech_recognition("temp_audio.mp3")
-            text = audio_result["text"]
-            
-            # Aufräumen
-            video.close()
-            if os.path.exists("temp_video.mp4"): os.remove("temp_video.mp4")
-            if os.path.exists("temp_audio.mp3"): os.remove("temp_audio.mp3")
-
     return text
 
 # --- 3. SIDEBAR ---
 with st.sidebar:
     st.header("Konfiguration")
-    if "hf_token" not in st.session_state:
-        st.session_state.hf_token = ""
-    
-    token_input = st.text_input("HuggingFace Token", value=st.session_state.hf_token, type="password")
-    if token_input:
-        st.session_state.hf_token = token_input
+    gemini_key = st.text_input("Gemini API Key", type="password")
+    if gemini_key:
+        st.session_state.gemini_key = gemini_key
 
     st.divider()
-    if st.button("Chat-Verlauf löschen"):
+    if st.button("Chat löschen"):
         st.session_state.messages = []
         st.rerun()
 
-# --- 4. DATEI UPLOAD & VERARBEITUNG ---
-uploaded_files = st.file_uploader(
-    "Dateien hochladen (PDF, DOCX, MP4)", 
-    type=["pdf", "docx", "mp4"], 
-    accept_multiple_files=True
-)
+# --- 4. VERARBEITUNG ---
+uploaded_files = st.file_uploader("Dateien hochladen", type=["pdf", "docx"], accept_multiple_files=True)
 
-if uploaded_files and st.session_state.hf_token:
-    if st.button("Dokumente analysieren"):
-        with st.spinner("Inhalte werden verarbeitet..."):
+if uploaded_files and "gemini_key" in st.session_state:
+    if st.button("Wissen generieren"):
+        with st.spinner("Analysiere Dokumente..."):
             all_chunks = []
             for file in uploaded_files:
-                raw_text = extract_text_from_file(file, st.session_state.hf_token)
+                raw_text = extract_text_from_file(file)
                 if raw_text:
-                    for i in range(0, len(raw_text), 1000):
-                        chunk = f"QUELLE: {file.name}\nINHALT: {raw_text[i:i+1000]}"
+                    for i in range(0, len(raw_text), 1500): # Größere Chunks für Gemini!
+                        chunk = f"QUELLE: {file.name}\n{raw_text[i:i+1500]}"
                         all_chunks.append(chunk)
             
             st.session_state.chunks = all_chunks
-            
-            # Embeddings erstellen
             embedder = load_embedder()
             embeddings = embedder.encode(all_chunks)
             
-            # FAISS Index (Gedächtnis) bauen
-            dimension = embeddings.shape[1]
-            index = faiss.IndexFlatL2(dimension)
+            index = faiss.IndexFlatL2(embeddings.shape[1])
             index.add(np.array(embeddings).astype('float32'))
             st.session_state.vector_index = index
-            
-            st.success(f"Erfolgreich! {len(all_chunks)} Textstellen gelernt.")
+            st.success("Gemini ist bereit!")
 
-# --- 5. CHAT INTERFACE ---
-st.divider()
-
+# --- 5. CHAT MIT GEMINI ---
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("Frag mich etwas..."):
-    if not st.session_state.hf_token or "vector_index" not in st.session_state:
-        st.error("Bitte Token eingeben und Dateien verarbeiten!")
+if prompt := st.chat_input("Frag Gemini etwas über deine Dateien..."):
+    if not st.session_state.get("gemini_key") or "vector_index" not in st.session_state:
+        st.error("Bitte API Key eingeben und Dokumente laden!")
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Suche läuft..."):
+            with st.spinner("Gemini denkt nach..."):
+                # 1. Relevante Stellen suchen (RAG)
                 embedder = load_embedder()
                 query_vec = embedder.encode([prompt])
-                D, I = st.session_state.vector_index.search(np.array(query_vec).astype('float32'), k=3)
+                D, I = st.session_state.vector_index.search(np.array(query_vec).astype('float32'), k=5)
                 
                 context = "\n\n".join([st.session_state.chunks[i] for i in I[0]])
                 
-                # RAG Antwort generieren
-                client = InferenceClient(api_key=st.session_state.hf_token)
-                system_instr = f"Antworte nur basierend auf diesem Kontext: {context}"
+                # 2. Gemini Client initialisieren
+                client = genai.Client(api_key=st.session_state.gemini_key)
+                
+                # 3. Antwort generieren
+                full_prompt = f"""
+                Du bist ein Experten-Assistent. Nutze den folgenden Kontext, um die Frage zu beantworten.
+                Falls die Antwort nicht im Kontext steht, suche nach was die antwort wäre aber sage dem user
+                das es nicht in den files steht sondern das du das vom internet hast und sage genau von welcher
+                quelle du die antwort hast. Wenn du die frage nicht beantworten kannst, sag das auch.
+                
+                KONTEXT:
+                {context}
+                
+                FRAGE:
+                {prompt}
+                """
                 
                 try:
-                    full_response = ""
-                    for message in client.chat_completion(
-                        model="mistralai/Mistral-7B-Instruct-v0.2",
-                        messages=[{"role": "system", "content": system_instr}, {"role": "user", "content": prompt}],
-                        max_tokens=800,
-                        stream=True
-                    ):
-                        full_response += message.choices[0].delta.content or ""
+                    # ich nutzen Gemini 2.0 Flash
+                    response = client.models.generate_content(
+                        model="gemini-2.0-flash", 
+                        contents=full_prompt
+                    )
                     
-                    st.markdown(full_response)
-                    st.session_state.messages.append({"role": "assistant", "content": full_response})
+                    answer = response.text
+                    st.markdown(answer)
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
                 except Exception as e:
-                    st.error(f"Fehler: {e}")
+                    st.error(f"Gemini Fehler: {e}")
