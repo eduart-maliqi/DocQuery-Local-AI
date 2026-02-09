@@ -6,17 +6,16 @@ from moviepy import VideoFileClip
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-from google import genai
-from google.genai import types
+from huggingface_hub import InferenceClient
 
 # --- 1. SETUP ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 model_path = os.path.join(current_dir, "models")
 os.makedirs(model_path, exist_ok=True)
 
-# I am setting up the English UI for the application
-st.set_page_config(page_title="DocQuery Gemini Pro", layout="wide")
-st.title("♊ DocQuery: Hybrid Search (Files + Web)")
+
+st.set_page_config(page_title="DocQuery HF Edition", layout="wide")
+st.title("🤖 DocQuery: Powered by Hugging Face")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -27,131 +26,131 @@ if "chunks" not in st.session_state:
 
 @st.cache_resource
 def load_embedder():
-    # I am loading the local embedding model for the RAG process
+    # loading the local embedding model for the search
     return SentenceTransformer("all-MiniLM-L6-v2", cache_folder=model_path)
 
-def extract_text_from_file(uploaded_file, gemini_key):
-    # I am handling different file types to extract the raw text
+def extract_text_from_file(uploaded_file, hf_token):
+    # extracting text from PDF, Word, or transcribing MP4 via HF
     filename = uploaded_file.name
     text = ""
+
     if filename.endswith(".pdf"):
         reader = PdfReader(uploaded_file)
         for page in reader.pages:
             text += page.extract_text() or ""
+            
     elif filename.endswith(".docx"):
         doc = docx.Document(uploaded_file)
         text = "\n".join([para.text for para in doc.paragraphs])
+        
     elif filename.endswith(".mp4"):
-        # I am processing video files by extracting and transcribing audio
-        with st.spinner(f"🎥 Processing video: {filename}..."):
+        with st.spinner(f"🎥 Transcribing video: {filename}..."):
+            #saving the video temporarily
             with open("temp_video.mp4", "wb") as f:
                 f.write(uploaded_file.getbuffer())
+            
+            # extracting the audio using MoviePy
             video = VideoFileClip("temp_video.mp4")
             video.audio.write_audiofile("temp_audio.mp3", logger=None)
             
-            # I am leaving a placeholder for transcription logic
-            text = "Video transcription placeholder..." 
+            # using HF Whisper for the transcription
+            client = InferenceClient(api_key=hf_token)
+            audio_result = client.automatic_speech_recognition("temp_audio.mp3")
+            text = audio_result["text"]
+            
+            # cleaning up the temporary files
             video.close()
             os.remove("temp_video.mp4")
             os.remove("temp_audio.mp3")
+
     return text
 
 # --- 3. SIDEBAR ---
 with st.sidebar:
     st.header("Settings")
-    # I am storing the Gemini API Key in the session state
-    gemini_key = st.text_input("Gemini API Key", type="password")
-    if gemini_key:
-        st.session_state.gemini_key = gemini_key
+    #using the HF Token instead of Gemini
+    if "hf_token" not in st.session_state:
+        st.session_state.hf_token = ""
     
-    # I am adding a model selector to switch if one model hits a limit
-    model_choice = st.selectbox("Select Model", 
-                                ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"],
-                                help="Use 1.5-flash if 2.0 shows 'Limit 0' errors")
+    token_input = st.text_input("Hugging Face Token", value=st.session_state.hf_token, type="password")
+    if token_input:
+        st.session_state.hf_token = token_input
 
     st.divider()
-    if st.button("Clear Chat"):
+    if st.button("Clear Chat History"):
         st.session_state.messages = []
         st.rerun()
 
 # --- 4. DATA PROCESSING ---
 uploaded_files = st.file_uploader("Upload Files (PDF, DOCX, MP4)", type=["pdf", "docx", "mp4"], accept_multiple_files=True)
 
-if uploaded_files and "gemini_key" in st.session_state:
-    if st.button("Index Documents"):
-        with st.spinner("I am analyzing the documents..."):
+if uploaded_files and st.session_state.hf_token:
+    if st.button("Analyze Documents"):
+        with st.spinner("I am building the knowledge base..."):
             all_chunks = []
             for file in uploaded_files:
-                raw_text = extract_text_from_file(file, st.session_state.gemini_key)
+                raw_text = extract_text_from_file(file, st.session_state.hf_token)
                 if raw_text:
-                    for i in range(0, len(raw_text), 1500):
-                        # I am including the filename as metadata for the AI
-                        chunk = f"SOURCE: {file.name}\nCONTENT: {raw_text[i:i+1500]}"
+                    for i in range(0, len(raw_text), 1000):
+                        # tagging the source for the AI
+                        chunk = f"SOURCE: {file.name}\nCONTENT: {raw_text[i:i+1000]}"
                         all_chunks.append(chunk)
             
             st.session_state.chunks = all_chunks
             embedder = load_embedder()
             embeddings = embedder.encode(all_chunks)
             
-            # I am using FAISS for high-speed local vector search
+            # creating the FAISS index locally
             index = faiss.IndexFlatL2(embeddings.shape[1])
             index.add(np.array(embeddings).astype('float32'))
             st.session_state.vector_index = index
-            st.success("I have indexed all documents successfully!")
+            st.success(f"Success! I learned from {len(all_chunks)} text segments.")
 
-# --- 5. INTERACTIVE CHAT ---
+# --- 5. CHAT INTERFACE ---
+st.divider()
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("Ask me anything..."):
-    if not st.session_state.get("gemini_key") or "vector_index" not in st.session_state:
-        st.error("I need an API key and indexed documents to help you!")
+if prompt := st.chat_input("Ask me about your files..."):
+    if not st.session_state.hf_token or "vector_index" not in st.session_state:
+        st.error("I need your HF Token and indexed documents!")
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("I am checking my records and searching the web..."):
-                # I am retrieving the most relevant chunks from your files
+            with st.spinner("I am thinking..."):
+                # searching for the 3 most relevant context parts
                 embedder = load_embedder()
                 query_vec = embedder.encode([prompt])
-                D, I = st.session_state.vector_index.search(np.array(query_vec).astype('float32'), k=5)
+                D, I = st.session_state.vector_index.search(np.array(query_vec).astype('float32'), k=3)
+                
                 context = "\n\n".join([st.session_state.chunks[i] for i in I[0]])
                 
-                # I am initializing the Gemini client with the Search tool
-                client = genai.Client(api_key=st.session_state.gemini_key)
-                
-                # I am using your custom system prompt instructions
-                full_prompt = f"""
-                You are an expert assistant. Use the following context to answer the question.
-                If the answer is not in the context, search for what the answer would be but inform the user 
-                that it is not in the files but that you got it from the internet and state exactly which 
-                source you used for the answer. If you cannot answer the question, say so.
-                
-                CONTEXT:
-                {context}
-                
-                QUESTION:
-                {prompt}
-                """
+                # calling the HF Mistral model
+                client = InferenceClient(api_key=st.session_state.hf_token)
+
+                system_instr = (
+                    f"You are an expert assistant. Use the following context to answer the question. "
+                    f"If the answer is not in the context, use your general knowledge but clearly state "
+                    f"that the information is not in the uploaded files. "
+                    f"\n\nCONTEXT:\n{context}"
+                )
                 
                 try:
-                    # I am performing the hybrid search using Gemini and Google Search
-                    response = client.models.generate_content(
-                        model=model_choice,
-                        contents=full_prompt,
-                        config=types.GenerateContentConfig(
-                            tools=[types.Tool(google_search=types.GoogleSearch())]
-                        )
-                    )
+                    full_response = ""
+                    for message in client.chat_completion(
+                        model="mistralai/Mistral-7B-Instruct-v0.2",
+                        messages=[{"role": "system", "content": system_instr}, {"role": "user", "content": prompt}],
+                        max_tokens=500,
+                        stream=True
+                    ):
+                        full_response += message.choices[0].delta.content or ""
                     
-                    # I am extracting and displaying the generated response
-                    answer = response.text
-                    st.markdown(answer)
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-                    
+                    st.markdown(full_response)
+                    st.session_state.messages.append({"role": "assistant", "content": full_response})
                 except Exception as e:
-                    # I am displaying an error if the API limit or quota is hit
-                    st.error(f"Gemini API Error: {e}")
+                    st.error(f"Error: {e}. (Maybe the model is still loading?)")
